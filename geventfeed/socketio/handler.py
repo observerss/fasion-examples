@@ -1,0 +1,132 @@
+import sys
+import re
+import gevent
+import urlparse
+
+from gevent.pywsgi import WSGIHandler
+from socketio import transports
+from socketio.protocol import SocketIOProtocol
+from geventwebsocket.handler import WebSocketHandler
+
+class SocketIOHandler(WSGIHandler):
+    RE_REQUEST_URL = re.compile(r"""
+        ^/(?P<namespace>[^/]+)
+         /(?P<protocol_version>[^/]+)
+         /(?P<transport_id>[^/]+)
+         /(?P<session_id>[^/]+)/?$
+         """, re.X)
+    RE_HANDSHAKE_URL = re.compile(r"^/(?P<namespace>[^/]+)/1/$", re.X)
+
+    handler_types = {
+        'websocket': transports.WebsocketTransport,
+        'flashsocket': transports.FlashSocketTransport,
+        'htmlfile': transports.HTMLFileTransport,
+        'xhr-multipart': transports.XHRMultipartTransport,
+        'xhr-polling': transports.XHRPollingTransport,
+        'jsonp-polling': transports.JSONPolling,
+    }
+
+    def __init__(self, *args, **kwargs):
+        self.socketio_connection = False
+        self.allowed_paths = None
+
+        super(SocketIOHandler, self).__init__(*args, **kwargs)
+
+    def _do_handshake(self, tokens):
+        if tokens["namespace"] != self.server.namespace:
+            self.log_error("Namespace mismatch")
+        else:
+            session = self.server.get_session()
+            #data = "%s:15:10:jsonp-polling,htmlfile" % (session.session_id,)
+            data = "%s:15:10:%s" % (session.session_id, ",".join(self.handler_types.keys()))
+            self.write_smart(data)
+
+    def write_jsonp_result(self, data, wrapper="0"):
+        self.start_response("200 OK", [
+            ("Content-Type", "application/javascript"),
+        ])
+        self.result = ['io.j[%s]("%s");' % (wrapper, data)]
+
+    def write_plain_result(self, data):
+        self.start_response("200 OK", [
+            ("Content-Type", "text/plain")
+        ])
+        self.result = [data]
+
+    def write_smart(self, data):
+        args = urlparse.parse_qs(self.environ.get("QUERY_STRING"))
+
+        if "jsonp" in args:
+            self.write_jsonp_result(data, args["jsonp"][0])
+        else:
+            self.write_plain_result(data)
+
+        self.process_result()
+
+    def handle_one_response(self):
+        self.status = None
+        self.headers_sent = False
+        self.result = None
+        self.response_length = 0
+        self.response_use_chunked = False
+
+        path = self.environ.get('PATH_INFO')
+        request_method = self.environ.get("REQUEST_METHOD")
+        request_tokens = self.RE_REQUEST_URL.match(path)
+
+        self.environ['socketio'] = SocketIOProtocol(self)
+
+        # Kick non-socket.io requests to our superclass
+        if not path.lstrip('/').startswith(self.server.namespace):
+            return super(SocketIOHandler, self).handle_one_response()
+
+        # Parse request URL and QUERY_STRING and do handshake
+        if request_tokens:
+            request_tokens = request_tokens.groupdict()
+        else:
+            handshake_tokens = self.RE_HANDSHAKE_URL.match(path)
+
+            if handshake_tokens:
+                return self._do_handshake(handshake_tokens.groupdict())
+            else:
+                # This is no socket.io request. Let the WSGI app handle it.
+                return super(SocketIOHandler, self).handle_one_response()
+
+        # Setup the transport and session
+        transport = self.handler_types.get(request_tokens["transport_id"])
+        session_id = request_tokens["session_id"]
+
+        # In case this is WebSocket request, switch to the WebSocketHandler
+        # FIXME: fix this ugly class change
+        if transport in (transports.WebsocketTransport, \
+                transports.FlashSocketTransport):
+            self.__class__ = WebSocketHandler
+            self.handle_one_response()
+
+        session = self.server.get_session(session_id)
+        if not session:
+            self.respond('400 Bad Reqeust')
+            return
+
+        # Make the session object available for WSGI apps
+        self.environ['socketio'].session = session
+
+        # Create a transport and handle the request likewise
+        self.transport = transport(self)
+        jobs = self.transport.connect(session, request_method)
+
+        try:
+            if not session.wsgi_app_greenlet or not bool(session.wsgi_app_greenlet):
+                session.wsgi_app_greenlet = gevent.spawn(self.application, self.environ, lambda status, headers, exc=None: None)
+        except:
+            self.handle_error(*sys.exc_info())
+
+        gevent.joinall(jobs)
+
+    def handle_bad_request(self):
+        self.close_connection = True
+        self.start_reponse("400 Bad Request", [
+            ('Content-Type', 'text/plain'),
+            ('Connection', 'close'),
+            ('Content-Length', 0)
+        ])
