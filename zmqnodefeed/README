@@ -1,0 +1,23 @@
+############
+# WORKFLOW #
+############
+$ node feedserver.js
+-> open browser 
+$ python crawler.py
+-> open vim playbyplay.txt
+watch browser results when we edit playbyplay text 
+
+########
+# TODO #
+########
+1.crash recovery
+2.catching up missing content
+-> simple thoughts: zodb for persistence, md5 for status
+
+class MatchLive:
+    match_id
+    change_sets: md5->diff list
+
+Python                             Node.js
+zodb server  <--zeromq req/rep-->  message logic    
+

@@ -1,0 +1,35 @@
+<html>
+    <head>
+        <script src="http://new1.simplecd.org:8124/socket.io/socket.io.js"></script>
+        <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js"></script>
+    </head>
+    <body>
+        <h1>Demo PlayByPlay Page</h1>
+        <div class="playbyplay" style="font-size:14px;color:#333;padding:10px;">
+            <div class="msg" style="border-top:1 solid #888;" id="0"></div>
+        </div>
+        <script>
+            if (typeof String.prototype.startsWith != 'function') {
+                String.prototype.startsWith = function (str){
+                    return this.slice(0, str.length) == str;
+                };
+            }
+            var socket = io.connect('http://new1.simplecd.org:8124');
+            socket.on('playbyplay', function (data) {
+                console.log(data);
+                var lines = data.split('\n');
+                var lineid = 0;
+                for (var i=0; i<lines.length; i++){
+                    lineid = lineid + 1;
+                    if (lines[i].startsWith('-')){
+                        $("#"+lineid).remove();
+                        lineid = lineid - 1;
+                    }else if (lines[i].startsWith('+')){
+                        $("#"+(lineid-1)).after('<div class="msg" style="border-bottom:1 dotted #888;" id="' 
+                            +lineid+'">'+lines[i].slice(1)+'</div>'); 
+                    } 
+                } 
+            });
+        </script>
+    </body>
+</html>
